@@ -2,7 +2,6 @@
 // Full game server for Hokm (Deno). Compatible with local run and Deno Deploy.
 // Requires env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
-import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPA_URL = Deno.env.get("SUPABASE_URL");
@@ -404,12 +403,8 @@ const handler = async (req: Request): Promise<Response> => {
 
 /* ---------------- start server (compatible local & deploy) ---------------- */
 if (import.meta.main) {
-  // running directly (local)
-  console.log("Starting server locally on http://localhost:8000");
-  // serve with port in local dev for convenience
-  await serve(handler, { port: 8000 });
-} else {
-  // running in Deploy/Edge environment: just serve (no explicit port)
-  serve(handler);
+  // ???? ?????
+  const { serve } = await import("https://deno.land/std@0.208.0/http/server.ts");
+  Deno.serve(handler);
 }
 
