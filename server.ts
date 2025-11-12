@@ -1,5 +1,7 @@
 // server.ts
-// Deno + Supabase JS (full game server with team scoring and end-game logic)
+// Full game server for Hokm (Deno). Compatible with local run and Deno Deploy.
+// Requires env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -7,11 +9,13 @@ const SUPA_URL = Deno.env.get("SUPABASE_URL");
 const SUPA_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 if (!SUPA_URL || !SUPA_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env var");
-  Deno.exit(1);
+  // If running as module (imported), do not exit; if run as script, exit to avoid silent failure.
+  if (import.meta.main) Deno.exit(1);
 }
-const supabase = createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } });
 
-/* Utilities */
+const supabase = createClient(SUPA_URL ?? "", SUPA_KEY ?? "", { auth: { persistSession: false } });
+
+/* ---------------- Utilities ---------------- */
 function shuffle<T>(arr: T[]) {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -20,8 +24,8 @@ function shuffle<T>(arr: T[]) {
 }
 
 function buildDeck(): string[] {
-  const suits = ["c", "d", "h", "s"]; // clubs, diamonds, hearts, spades
-  const ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "j", "q", "k", "a"];
+  const suits = ["c","d","h","s"]; // clubs, diamonds, hearts, spades
+  const ranks = ["2","3","4","5","6","7","8","9","10","j","q","k","a"];
   const deck: string[] = [];
   for (const r of ranks) for (const s of suits) deck.push(`${r}_${s}`);
   return deck;
@@ -36,7 +40,7 @@ function rankValue(rank: string) {
   return isNaN(n) ? 0 : n;
 }
 
-/* Handlers */
+/* ---------------- Handlers (logic) ---------------- */
 
 // create_room
 async function createRoomHandler(body: any) {
@@ -51,13 +55,12 @@ async function createRoomHandler(body: any) {
     target_tricks: targetTricks,
     trump_mode: trumpMode,
     phase: 'waiting',
-    team_scores: { teamA: 0, teamB: 0 }, // init
+    team_scores: { teamA: 0, teamB: 0 },
     last_trick_winner: null
   }]);
   if (e1) throw e1;
 
-  // create 4 player slots
-  const slots = [0, 1, 2, 3].map(i => ({
+  const slots = [0,1,2,3].map(i => ({
     room_id: roomId,
     slot: i,
     user_id: null,
@@ -68,7 +71,6 @@ async function createRoomHandler(body: any) {
   const { error: e2 } = await supabase.from("room_players").insert(slots);
   if (e2) throw e2;
 
-  // init current_trick
   await supabase.from("current_trick").upsert({ room_id: roomId, plays: [] });
 
   return { ok: true, roomId };
@@ -83,12 +85,11 @@ async function joinRoomHandler(body: any) {
 
   const { data: slots } = await supabase.from("room_players").select("*").eq("room_id", roomId).order("slot", { ascending: true }).limit(4);
   if (!slots) throw new Error("room_not_found");
-  let chosen = null;
+  let chosen: any = null;
   for (const s of slots) {
     if (s.type === 'empty' || !s.user_id) { chosen = s; break; }
   }
   if (!chosen) {
-    // try to replace disconnected human
     for (const s of slots) {
       if (!s.connected && s.type === 'human') { chosen = s; break; }
     }
@@ -111,11 +112,9 @@ async function startDealHandler(body: any) {
   const roomId = body.roomId;
   if (!roomId) throw new Error("bad_request");
 
-  // read players
   const { data: players } = await supabase.from("room_players").select("*").eq("room_id", roomId).order("slot", { ascending: true });
   if (!players) throw new Error("players_missing");
 
-  // fill empty slots with bots
   for (const p of players) {
     if (!p) continue;
     if (p.type === 'empty' || !p.user_id) {
@@ -128,33 +127,28 @@ async function startDealHandler(body: any) {
     }
   }
 
-  // re-read players
   const { data: players2 } = await supabase.from("room_players").select("*").eq("room_id", roomId).order("slot", { ascending: true });
-
-  // build deck and shuffle
   const deck = buildDeck();
   shuffle(deck);
 
-  // pending 8 each
+  // build pending (8 each)
   const pending: Record<string, string[]> = {};
-  for (let k = 0; k < 8; k++) for (let i = 0; i < 4; i++) {
+  for (let k=0;k<8;k++) for (let i=0;i<4;i++) {
     if (!pending[String(i)]) pending[String(i)] = [];
     pending[String(i)].push(deck.shift()!);
   }
 
-  // deal initial 5 cards each
-  const initialHands: Record<number, string[]> = { 0: [], 1: [], 2: [], 3: [] };
-  for (let r = 0; r < 5; r++) for (let i = 0; i < 4; i++) initialHands[i].push(deck.shift()!);
+  // deal 5 cards each
+  const initialHands: Record<number, string[]> = {0:[],1:[],2:[],3:[]};
+  for (let r=0;r<5;r++) for (let i=0;i<4;i++) initialHands[i].push(deck.shift()!);
 
-  // write hands to DB (owner = user_id or bot_x)
-  for (let i = 0; i < 4; i++) {
+  for (let i=0;i<4;i++) {
     const p = players2[i];
     const owner = p.user_id || `bot_${i}`;
     await supabase.from("hands").upsert({ room_id: roomId, owner, cards: initialHands[i] });
   }
 
-  // update room with deck/pending and set phase choosing_hakim
-  const hakim_index = Math.floor(Math.random() * 4);
+  const hakim_index = Math.floor(Math.random()*4);
   const { error } = await supabase.from("rooms").update({
     deck,
     pending,
@@ -199,11 +193,7 @@ async function getRoomStateHandler(url: URL) {
   return { room, players, hands, trick };
 }
 
-/**
- * Helper to evaluate trick winner given plays array and current trump
-  * plays: [{slot, card, at}, ...] length = 4
-   * returns winnerSlot
-    */
+/* Trick evaluation helpers */
 function evaluateTrickWinner(plays: any[], trump: string | null) {
   if (!plays || plays.length === 0) return null;
   const firstCard = plays[0].card;
@@ -214,46 +204,35 @@ function evaluateTrickWinner(plays: any[], trump: string | null) {
   for (const p of plays) {
     const c = p.card;
     const s = c.split("_")[1];
-    // if current card is trump and bestCard not trump -> win
+    // trump considerations
     if (trump && s === trump) {
       if (bestCard.split("_")[1] !== trump) { winnerSlot = p.slot; bestCard = c; continue; }
-      // both trump -> compare rank
-      if (rankValue(c.split("_")[0]) > rankValue(bestCard.split("_")[0])) { winnerSlot = p.slot; bestCard = c; }
+      if (rankValue(c.split("_")[0]) > rankValue(bestCard.split("_")[0])) { winnerSlot = p.slot; bestCard = c; continue; }
       continue;
     }
-    // if bestCard is trump and this is not trump -> best stays
     if (bestCard.split("_")[1] === trump && s !== trump) continue;
-    // if same suit as bestCard, compare rank
     if (s === bestCard.split("_")[1]) {
-      if (rankValue(c.split("_")[0]) > rankValue(bestCard.split("_")[0])) { winnerSlot = p.slot; bestCard = c; }
-      continue;
+      if (rankValue(c.split("_")[0]) > rankValue(bestCard.split("_")[0])) { winnerSlot = p.slot; bestCard = c; continue; }
     }
-    // if candidate follows lead and bestCard doesn't, candidate wins
     if (s === leadSuit && bestCard.split("_")[1] !== leadSuit) {
-      winnerSlot = p.slot; bestCard = c;
+      winnerSlot = p.slot; bestCard = c; continue;
     }
-    // else keep bestCard
   }
   return winnerSlot;
 }
 
-// helper to increment team score and check finish
 async function applyTrickResultAndCheckEnd(roomId: string, winnerSlot: number) {
-  // fetch room current values
   const { data: room } = await supabase.from("rooms").select("*").eq("id", roomId).limit(1).single();
   if (!room) throw new Error("room_not_found");
   const target = room.target_tricks || 7;
-  // initialize team_scores if missing
   const scores = (room.team_scores && typeof room.team_scores === 'object') ? { ...(room.team_scores) } : { teamA: 0, teamB: 0 };
-  // teamA = slots 0 & 1, teamB = 2 & 3
+
   if (winnerSlot === 0 || winnerSlot === 1) scores.teamA = (scores.teamA || 0) + 1;
   else scores.teamB = (scores.teamB || 0) + 1;
 
   let updates: any = { team_scores: scores, last_trick_winner: winnerSlot };
 
-  // check for end condition
   if ((scores.teamA >= target) || (scores.teamB >= target)) {
-    // game finished
     updates.phase = 'finished';
     updates.winner_team = scores.teamA >= target ? 'teamA' : 'teamB';
     updates.winner_time = new Date().toISOString();
@@ -264,49 +243,39 @@ async function applyTrickResultAndCheckEnd(roomId: string, winnerSlot: number) {
   return { scores, finished: updates.phase === 'finished', winner_team: updates.winner_team || null };
 }
 
-// play_card: verifies ownership, removes card from hand, appends to current_trick,
-// advances current_turn_index, and when 4 plays evaluate trick and apply scoring.
+// play_card
 async function playCardHandler(body: any) {
   const { roomId, slot, card } = body;
   if (!roomId || slot === undefined || !card) throw new Error("bad_request");
 
-  // read room and player
   const { data: playerRow } = await supabase.from("room_players").select("*").eq("room_id", roomId).eq("slot", slot).limit(1).single();
   if (!playerRow) throw new Error("slot_not_found");
   const owner = playerRow.user_id || `bot_${slot}`;
 
-  // get hand
   const { data: handRow } = await supabase.from("hands").select("*").eq("room_id", roomId).eq("owner", owner).limit(1).single();
   if (!handRow) throw new Error("hand_not_found");
   const cards: string[] = handRow.cards || [];
   const idx = cards.indexOf(card);
   if (idx === -1) throw new Error("card_not_in_hand");
 
-  // remove card from hand
   cards.splice(idx, 1);
   await supabase.from("hands").update({ cards }).match({ room_id: roomId, owner });
 
-  // append to current_trick
   const { data: ct } = await supabase.from("current_trick").select("*").eq("room_id", roomId).limit(1).single();
   const plays = ct && ct.plays ? (Array.isArray(ct.plays) ? ct.plays.slice() : []) : [];
   plays.push({ slot, card, at: new Date().toISOString() });
   await supabase.from("current_trick").upsert({ room_id: roomId, plays });
 
-  // advance current_turn_index
   const { data: room } = await supabase.from("rooms").select("*").eq("id", roomId).limit(1).single();
   if (!room) throw new Error("room_not_found");
   let nextIndex = ((room.current_turn_index ?? 0) + 1) % 4;
   await supabase.from("rooms").update({ current_turn_index: nextIndex }).match({ id: roomId });
 
-  // if plays length == 4 -> evaluate trick
   if (plays.length >= 4) {
     const trump = room.trump || room.trump_mode || null;
     const winnerSlot = evaluateTrickWinner(plays, trump);
-    // clear plays
     await supabase.from("current_trick").upsert({ room_id: roomId, plays: [] });
-    // apply scoring and check end
     const res = await applyTrickResultAndCheckEnd(roomId, winnerSlot);
-    // set next turn to winner if game not ended (or still set even if ended)
     await supabase.from("rooms").update({ current_turn_index: winnerSlot }).match({ id: roomId });
     return { ok: true, winnerSlot, team_scores: res.scores, finished: res.finished, winner_team: res.winner_team };
   }
@@ -314,28 +283,24 @@ async function playCardHandler(body: any) {
   return { ok: true };
 }
 
-// set_trump: only hakim should call. Set trump, distribute pending, set phase=playing
+// set_trump
 async function setTrumpHandler(body: any) {
   const { roomId, trump } = body;
   if (!roomId || trump === undefined || trump === null) throw new Error("bad_request");
-  // allowed trumps: 'c','d','h','s' or maybe 'STANDARD'/'SERS'/'NERS' depending usage
-  // Accept either suit codes or the modes
-  const allowed = ["c", "d", "h", "s", "STANDARD", "SERS", "NERS"];
+  const allowed = ["c","d","h","s","STANDARD","SERS","NERS"];
   if (!allowed.includes(trump)) throw new Error("invalid_trump");
 
-  // update rooms.trump and set phase playing
   const { error } = await supabase.from("rooms").update({
     trump,
     phase: 'playing'
   }).match({ id: roomId });
   if (error) throw error;
 
-  // distribute pending if exists
   const { data: room } = await supabase.from("rooms").select("*").eq("id", roomId).limit(1).single();
   if (!room) throw new Error("room_not_found");
   const pending = room.pending || {};
-  // for each slot, append pending[slot] to corresponding owner's hand
-  for (let i = 0; i < 4; i++) {
+
+  for (let i=0;i<4;i++) {
     const pRes = await supabase.from("room_players").select("user_id").eq("room_id", roomId).eq("slot", i).limit(1).single();
     const owner = pRes.data && pRes.data.user_id ? pRes.data.user_id : `bot_${i}`;
     const { data: handRow } = await supabase.from("hands").select("*").eq("room_id", roomId).eq("owner", owner).limit(1).single();
@@ -344,13 +309,13 @@ async function setTrumpHandler(body: any) {
     const newcards = existing.concat(add);
     await supabase.from("hands").upsert({ room_id: roomId, owner, cards: newcards });
   }
-  // clear pending
+
   await supabase.from("rooms").update({ pending: {} }).match({ id: roomId });
 
   return { ok: true };
 }
 
-// bot_play: server-side simple bot action: pick a legal card (simple heuristic) and process via playCardHandler
+// bot_play
 async function botPlayHandler(body: any) {
   const { roomId, bot_slot } = body;
   if (!roomId || bot_slot === undefined) throw new Error("bad_request");
@@ -361,17 +326,15 @@ async function botPlayHandler(body: any) {
   const cards: string[] = handRow.cards || [];
   if (!cards || cards.length === 0) throw new Error("bot_no_cards");
 
-  // fetch current trick to get leadSuit
   const { data: ct } = await supabase.from("current_trick").select("*").eq("room_id", roomId).limit(1).single();
   const plays = ct && ct.plays ? ct.plays : [];
   const leadSuit = (plays.length > 0) ? plays[0].card.split("_")[1] : null;
 
-  // naive legal-play selection: if have lead suit, play highest of that suit; else play first
   let chosenIndex = 0;
   if (leadSuit) {
     let foundIdx = -1;
     let bestVal = -1;
-    for (let i = 0; i < cards.length; i++) {
+    for (let i=0;i<cards.length;i++) {
       const c = cards[i];
       if (c.split("_")[1] === leadSuit) {
         const rv = rankValue(c.split("_")[0]);
@@ -382,58 +345,71 @@ async function botPlayHandler(body: any) {
   }
   const chosenCard = cards[chosenIndex];
 
-  // now process as a normal play
+  // reuse playCardHandler (server-side play)
   const res = await playCardHandler({ roomId, slot: bot_slot, card: chosenCard });
   return { ok: true, chosen: chosenCard, result: res };
 }
 
-/* HTTP server routing */
-serve(async (req) => {
+/* ---------------- HTTP routing ---------------- */
+
+const handler = async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
     if (req.method === "POST" && url.pathname === "/create_room") {
       const body = await req.json();
       const r = await createRoomHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "POST" && url.pathname === "/join_room") {
       const body = await req.json();
       const r = await joinRoomHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "POST" && url.pathname === "/start_deal") {
       const body = await req.json();
       const r = await startDealHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "POST" && url.pathname === "/kick_player") {
       const body = await req.json();
       const r = await kickPlayerHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "POST" && url.pathname === "/bot_play") {
       const body = await req.json();
       const r = await botPlayHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "GET" && url.pathname === "/get_room_state") {
       const r = await getRoomStateHandler(url);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "POST" && url.pathname === "/set_trump") {
       const body = await req.json();
       const r = await setTrumpHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
     if (req.method === "POST" && url.pathname === "/play_card") {
       const body = await req.json();
       const r = await playCardHandler(body);
-      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(r), { status: 200, headers: { "Content-Type":"application/json" } });
     }
 
-    return new Response(JSON.stringify({ error: "not_found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: "not_found" }), { status: 404, headers: { "Content-Type":"application/json" } });
   } catch (err) {
     const msg = (err instanceof Error) ? err.message : String(err);
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { "Content-Type":"application/json" } });
   }
-});
+};
+
+/* ---------------- start server (compatible local & deploy) ---------------- */
+if (import.meta.main) {
+  // running directly (local)
+  console.log("Starting server locally on http://localhost:8000");
+  // serve with port in local dev for convenience
+  await serve(handler, { port: 8000 });
+} else {
+  // running in Deploy/Edge environment: just serve (no explicit port)
+  serve(handler);
+}
+
